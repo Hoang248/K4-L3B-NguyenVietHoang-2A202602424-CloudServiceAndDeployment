@@ -1,0 +1,76 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test CP1–CP4
+    runs-on: ubuntu-latest
+    env:
+      AGENT_API_KEY: ci-dummy
+      REDIS_URL: fake://
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run checkpoint tests
+        run: python -m pytest tests/ -v --ignore=tests/test_cp5.py --ignore=tests/test_bonus_cicd.py
+
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --tag day12-agent:ci .
+
+  deploy:
+    name: Deploy to Render
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          test -n "$RENDER_DEPLOY_HOOK_URL"
+          curl --fail-with-body --silent --show-error \
+            --request POST "$RENDER_DEPLOY_HOOK_URL"
+
+      - name: Smoke test
+        env:
+          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+        run: |
+          test -n "$PUBLIC_URL"
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error "$PUBLIC_URL/health"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "The deployed service did not become healthy in time."
+          exit 1
